@@ -1,0 +1,164 @@
+name: Build and Release Aseprite
+on:
+  workflow_dispatch:  # 仅手动触发
+    inputs:
+      version:
+        description: '版本号 (例如: v1.2.3)'
+        required: true
+        default: 'v1.0.0'
+      build_type:
+        description: '构建类型'
+        type: choice
+        required: true
+        default: 'Release'
+        options:
+          - Release
+          - Debug
+      enable_ui:
+        description: '启用UI'
+        type: choice
+        required: true
+        default: 'on'
+        options:
+          - 'on'
+          - 'off'
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    permissions:
+      contents: write  # 必须有写入权限才能创建 Releases
+    
+    env:
+      BUILD_TYPE: ${{ github.event.inputs.build_type }}
+      ENABLE_UI: ${{ github.event.inputs.enable_ui }}
+      VERSION: ${{ github.event.inputs.version }}
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: 'recursive'
+        fetch-depth: 0  # 获取所有历史记录以便打标签
+    
+    - name: Setup Ninja
+      uses: turtlesec-no/get-ninja@main
+    
+    - name: Setup MSVC
+      uses: ilammy/msvc-dev-cmd@v1
+    
+    - name: Clean Strawberry Perl (Windows 2022 workaround)
+      shell: bash
+      run: |
+        rm -rf C:/Strawberry/ || true
+    
+    - name: Download Skia
+      shell: bash
+      run: |
+        curl -L https://github.com/blueloveTH/aseprite/releases/download/v0.01/skia.zip --output skia.zip
+        curl -L https://github.com/blueloveTH/aseprite/releases/download/v0.01/libcrypto-1_1-x64.dll --output libcrypto-1_1-x64.dll
+        7z x skia.zip -y
+    
+    - name: Configure CMake
+      shell: bash
+      run: |
+        cmake -S . -B build -G Ninja \
+          -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+          -DENABLE_UI=${{ env.ENABLE_UI }} \
+          -DENABLE_CCACHE=OFF \
+          -DLAF_BACKEND=skia \
+          -DSKIA_DIR=./skia \
+          -DSKIA_LIBRARY_DIR=./skia/out/Release-x64 \
+          -DSKIA_LIBRARY=./skia/out/Release-x64/skia.lib \
+          -DCMAKE_INSTALL_PREFIX=./install
+    
+    - name: Build with Ninja
+      shell: bash
+      run: |
+        cd build && ninja -j$(nproc)
+    
+    - name: Install to local directory
+      shell: bash
+      run: |
+        cd build && ninja install
+    
+    - name: Collect DLL dependencies (Windows)
+      shell: bash
+      run: |
+        # 创建一个临时目录存放所有依赖
+        mkdir -p release_temp
+        cp install/bin/aseprite.exe release_temp/
+        cp install/bin/*.dll release_temp/ 2>/dev/null || true
+        
+        # 复制数据目录
+        if [ -d "install/bin/data" ]; then
+          cp -r install/bin/data release_temp/
+        fi
+        
+        # 复制通过 curl 下载的 DLL
+        if [ -f "libcrypto-1_1-x64.dll" ]; then
+          cp libcrypto-1_1-x64.dll release_temp/
+        fi
+    
+    - name: Create version file
+      shell: bash
+      run: |
+        echo "Aseprite ${{ env.VERSION }}" > release_temp/VERSION.txt
+        echo "Build Type: ${{ env.BUILD_TYPE }}" >> release_temp/VERSION.txt
+        echo "UI Enabled: ${{ env.ENABLE_UI }}" >> release_temp/VERSION.txt
+        echo "Build Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> release_temp/VERSION.txt
+        echo "Git Commit: ${{ github.sha }}" >> release_temp/VERSION.txt
+    
+    - name: Create ZIP archive
+      shell: bash
+      run: |
+        cd release_temp
+        7z a -tzip ../aseprite-windows-x64-${{ env.VERSION }}.zip *
+        cd ..
+        echo "Archive created: aseprite-windows-x64-${{ env.VERSION }}.zip"
+        dir *.zip
+    
+    - name: Create Git Tag
+      shell: bash
+      run: |
+        git config --local user.email "github-actions[bot]@users.noreply.github.com"
+        git config --local user.name "github-actions[bot]"
+        git tag -a "${{ env.VERSION }}" -m "Release ${{ env.VERSION }}"
+        git push origin "${{ env.VERSION }}"
+    
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ env.VERSION }}
+        name: "Aseprite ${{ env.VERSION }}"
+        body: |
+          # Aseprite ${{ env.VERSION }}
+          
+          ## 构建信息
+          - **构建类型**: ${{ env.BUILD_TYPE }}
+          - **UI 支持**: ${{ env.ENABLE_UI }}
+          - **构建日期**: ${{ fromJSON('["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]')[github.event.head_commit.timestamp.slice(5,7)-1] }} ${{ github.event.head_commit.timestamp.slice(8,10) }}, ${{ github.event.head_commit.timestamp.slice(0,4) }}
+          - **提交**: [${{ github.sha }}](https://github.com/${{ github.repository }}/commit/${{ github.sha }})
+          
+          ## 下载说明
+          1. 下载 `aseprite-windows-x64-${{ env.VERSION }}.zip`
+          2. 解压到任意目录
+          3. 运行 `aseprite.exe`
+          
+          ## 系统要求
+          - Windows 10/11 64位
+        draft: false
+        prerelease: false
+        files: |
+          aseprite-windows-x64-${{ env.VERSION }}.zip
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Upload Build Artifact (optional)
+      uses: actions/upload-artifact@v4
+      with:
+        name: aseprite-build-${{ env.VERSION }}
+        path: |
+          aseprite-windows-x64-${{ env.VERSION }}.zip
+          install/bin/aseprite.exe
+        retention-days: 7
