@@ -52,19 +52,16 @@ jobs:
       run: |
         rm -rf C:/Strawberry/ || true
     
-    - name: Download Skia
+    - name: Download Pre-built Skia (Standard Method)
       shell: bash
       run: |
-        # 克隆特定的 Aseprite 版 Skia 分支
-        git clone -b aseprite-m102 https://github.com/aseprite/skia.git skia_src
-        cd skia_src
-        # 同步所有依赖项
-        python tools/git-sync-deps
-        # 生成编译配置（假设在Windows x64平台，构建Release版本）
-        gn gen out/Release-x64 --args="is_debug=false"
-        # 使用 ninja 进行编译
-        ninja -C out/Release-x64 skia modules
-        cd ..
+        # 进入工作区目录，确保脚本路径正确
+        cd "${{ github.workspace }}"
+        # 调用官方脚本获取对应平台Skia的下载URL并下载解压
+        skia_url=$(source ./laf/misc/skia-url.sh | xargs)
+        skia_file=$(basename "$skia_url")
+        curl --ssl-revoke-best-effort -L -o "$skia_file" "$skia_url"
+        unzip "$skia_file" -d skia
     
     - name: Configure CMake
       shell: bash
@@ -74,9 +71,9 @@ jobs:
           -DENABLE_UI=${{ env.ENABLE_UI }} \
           -DENABLE_CCACHE=OFF \
           -DLAF_BACKEND=skia \
-          -DSKIA_DIR=./skia_src \
-          -DSKIA_LIBRARY_DIR=./skia_src/out/Release-x64 \
-          -DSKIA_LIBRARY=./skia_src/out/Release-x64/skia.lib \
+          -DSKIA_DIR=$(realpath skia) \
+          -DSKIA_LIBRARY_DIR=$(realpath skia/out/Release-x64) \
+          -DSKIA_LIBRARY=$(realpath skia/out/Release-x64/skia.lib)\
           -DCMAKE_INSTALL_PREFIX=./install
     
     - name: Build with Ninja
